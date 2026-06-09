@@ -1,0 +1,62 @@
+cancel_alarm:
+  name: Cancel alarm
+  description: >
+    Send an alarm "cancel" to the panel's monitoring (abort a triggered or
+    in-progress alarm report). Generates a real central-station event.
+
+confirm_alarm:
+  name: Confirm alarm
+  description: >
+    Send an alarm "confirm" to the panel's monitoring (verify a real alarm).
+    Generates a real central-station event.
+
+bypass_zone:
+  name: Bypass zone
+  description: Bypass or unbypass a zone by its index.
+  fields:
+    zone:
+      name: Zone index
+      description: The numeric zone index to (un)bypass.
+      required: true
+      example: 3
+      selector:
+        number:
+          min: 0
+          max: 127
+          mode: box
+    bypass:
+      name: Bypass
+      description: True to bypass the zone, false to unbypass.
+      required: false
+      default: true
+      selector:
+        boolean:
+
+force_arm:
+  name: Force arm
+  description: >
+    Arm even when zones are open/not-ready. The default method bypasses any currently
+    open zones and then arms with your stored PIN (most reliable). The "native" method
+    uses the panel's built-in force-arm command instead. Bypasses clear on the next disarm.
+  fields:
+    mode:
+      name: Mode
+      description: Which armed mode to set.
+      required: true
+      example: away
+      selector:
+        select:
+          options:
+            - home
+            - away
+            - night
+    method:
+      name: Method
+      description: How to force. "bypass" = bypass open zones then arm (PIN). "native" = panel forceArm command.
+      required: false
+      default: bypass
+      selector:
+        select:
+          options:
+            - bypass
+            - native

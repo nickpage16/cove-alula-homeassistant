@@ -1,0 +1,14 @@
+{
+  "domain": "cove_alula",
+  "name": "Cove (Alula) Alarm",
+  "codeowners": [
+    "@sam3gp8"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/sam3gp8/cove-alula-homeassistant",
+  "integration_type": "hub",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/sam3gp8/cove-alula-homeassistant/issues",
+  "requirements": [],
+  "version": "0.9.0"
+}

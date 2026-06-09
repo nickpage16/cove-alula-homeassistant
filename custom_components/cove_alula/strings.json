@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Cove (Alula) Alarm",
+        "description": "Sign in with your Cove credentials. Use your Cove email address or account number (e.g. C123456) as the username. Your PIN is used to arm/disarm and is stored in Home Assistant.",
+        "data": {
+          "email": "Email or account number",
+          "password": "Password",
+          "pin": "Arm/disarm PIN"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid username or password.",
+      "cannot_connect": "Could not reach the Cove/Alula service."
+    },
+    "abort": {
+      "already_configured": "This account is already configured."
+    }
+  }
+}
