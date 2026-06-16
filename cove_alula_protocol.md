@@ -334,8 +334,8 @@ HA `AlarmControlPanelState` ↔ Cove:
 |---|---|
 | `disarmed` | 1 |
 | `armed_home` | 2 |
-| `armed_away` | 3 |
-| `armed_night` | 4 |
+| `armed_night` | 3 |
+| `armed_away` | 4 |
 | `arming` | command sent / `in_exit_delay` |
 | `pending` | `in_entry_delay` |
 | `triggered` | `alarm` set |

@@ -42,21 +42,25 @@ CLIENT_SECRET = "Uzka3sgLNDTaH3cQ"
 
 USER_AGENT = "CoveConnect/4.3.121 (HomeAssistant integration)"
 
-# armingLevelValue == ArmingLevel.getByteCode(). Verified from the decompiled enum:
+# armingLevelValue == ArmingLevel.getByteCode(). Byte codes verified from the decompiled
+# enum:
 #   LEVEL_0 byte 0  -> "unknown"  (placeholder/unknown state, NEVER a command target)
 #   LEVEL_1 byte 1  -> "disarmed" / can_disarm     <- this is DISARM
-#   LEVEL_2 byte 2  -> first armed level  (typically "stay"/"home")
-#   LEVEL_3 byte 3  -> second armed level (typically "away")
-#   LEVEL_4..8      -> further armed/custom levels
-#   ANY     byte 255
+#   LEVEL_2 byte 2  -> first armed level  ("stay"/"home")
+#   LEVEL_3 byte 3  -> armed level        ("night" on this panel family)
+#   LEVEL_4 byte 4  -> armed level        ("away" on this panel family)
 # requestDisarmWithPin() in the app sends armingLevelValue = LEVEL_1.getByteCode() = 1,
-# so disarm is 1 (NOT 0). The semantic label of each *armed* level (stay/away/night) is
-# configured per panel; read them with request_arming_level_names() and adjust if needed.
+# so disarm is 1 (NOT 0). The *semantic label* of each armed level (stay/away/night) is
+# configured per panel and the enum's own naming did not match real behavior here:
+# on-device testing (arming each mode and reading it back on the panel) showed byte 3 =
+# NIGHT and byte 4 = AWAY, which is the reverse of the enum's nominal ordering. The numbers
+# below are the single source of truth for both arming commands and state read-back, so
+# they stay consistent. If a different panel maps these the other way, swap these two.
 LEVEL_UNKNOWN = 0
 LEVEL_DISARM = 1
 LEVEL_STAY = 2   # home / first armed level
-LEVEL_AWAY = 3
-LEVEL_NIGHT = 4
+LEVEL_NIGHT = 3  # corrected from on-device testing (enum nominally called byte 3 "away")
+LEVEL_AWAY = 4   # corrected from on-device testing (enum nominally called byte 4 "night")
 
 CMD_CHANGE_ARMING_LEVEL = "changeArmingLevelUsingCode"
 CMD_REQUEST_MFD = "requestMfd"
@@ -1242,7 +1246,7 @@ class CoveAlulaClient:
         no_entry_delay: bool = False,
         wait: bool = False,
     ) -> Optional[dict]:
-        """Set armingLevelValue using `pin`. 1=disarm, 2=stay, 3=away, 4=night, … (the
+        """Set armingLevelValue using `pin`. 1=disarm, 2=stay, 3=night, 4=away, … (the
         meaning of each armed level is per-panel; confirm with request_arming_level_names)."""
         payload = {
             "armingLevelValue": int(level),

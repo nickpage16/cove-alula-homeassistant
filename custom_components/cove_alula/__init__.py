@@ -22,9 +22,11 @@ from .const import (
     SERVICE_FORCE_ARM,
 )
 from .coordinator import CoveAlulaCoordinator
+from .covealula import LEVEL_AWAY, LEVEL_NIGHT, LEVEL_STAY
 
-# arm mode -> armingLevelValue (1=disarm, 2=stay/home, 3=away, 4=night)
-_MODE_LEVEL = {"home": 2, "stay": 2, "away": 3, "night": 4}
+# arm mode -> armingLevelValue. Sourced from the client constants so the away/night
+# assignment can never drift out of sync with the arm/read mapping there.
+_MODE_LEVEL = {"home": LEVEL_STAY, "stay": LEVEL_STAY, "away": LEVEL_AWAY, "night": LEVEL_NIGHT}
 
 
 def _coordinators(hass: HomeAssistant) -> list[CoveAlulaCoordinator]:
