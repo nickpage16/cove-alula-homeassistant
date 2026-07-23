@@ -971,15 +971,17 @@ class CoveAlulaClient:
         if self._ws_task is None or self._ws_task.done():
             await self.async_connect_ws()
         try:
-            await asyncio.wait_for(self._connected.wait(), 8.0)
+            await asyncio.wait_for(self._connected.wait(), 5.0)
         except asyncio.TimeoutError:
-            _LOGGER.debug("reconcile: no ready frame within 8s; reading anyway")
+            _LOGGER.debug("reconcile: no ready frame within 5s; reading anyway")
         ps = self.panels.get(device_id)
         if ps is None or ps.highest_zone_index is None:
             try:
-                await self.request_highest_indices(device_id, wait=True, timeout=8)
-            except CoveAlulaError:
-                pass
+                await self.request_highest_indices(device_id, wait=True, timeout=5)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("reconcile: highestUsedIndexes unavailable (%s)", err)
         await self.request_panel_status(device_id)
         await asyncio.sleep(0.15)
         ps = self.panels.get(device_id)
@@ -1181,18 +1183,30 @@ class CoveAlulaClient:
             await asyncio.sleep(1.0)
         return await self.async_set_arming_level(device_id, level, pin, wait=wait)
 
-    async def async_refresh_state(self, device_id: str) -> None:
+    async def async_refresh_state(self, device_id: str, *, budget: float = 30.0) -> None:
         """Subscribe, then pull a fresh snapshot. Reads are issued sequentially and the
         critical ones are awaited, because firing many reads back-to-back makes the cloud
         drop some responses (observed: panelName/panelStatus occasionally missing). We wait
-        for highestUsedIndexes before loading zones so we read only the real zone range."""
+        for highestUsedIndexes before loading zones so we read only the real zone range.
+
+        `budget` caps the TOTAL time spent here. Without it a slow or unresponsive cloud
+        could park this for ~45s, and Home Assistant cancels config-entry setup that blocks
+        that long (which surfaced as a CancelledError mid-read). Anything not read within
+        the budget simply arrives later via the coordinator poll or a live push.
+        """
         await self.async_subscribe_device(device_id)
+        deadline = time.monotonic() + budget
 
         async def _try(coro_fn, *, timeout: float = 8.0) -> None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.5:
+                return  # out of budget; leave the rest to the poll/pushes
             try:
-                await coro_fn(device_id, wait=True, timeout=timeout)
-            except CoveAlulaError:
-                pass  # NAK/timeout on a given read is fine; others still populate state
+                await coro_fn(device_id, wait=True, timeout=min(timeout, remaining))
+            except asyncio.CancelledError:
+                raise  # never swallow cancellation (HA shutdown / entry reload)
+            except Exception as err:  # noqa: BLE001 - NAK, timeout, transient socket error
+                _LOGGER.debug("refresh read failed (%s); continuing", err)
             await asyncio.sleep(0.2)
 
         await _try(self.request_panel_name)
@@ -1203,7 +1217,13 @@ class CoveAlulaClient:
         await _try(self.request_system_status, timeout=5.0)
         await _try(self.request_partition_status, timeout=5.0)
         # now that the zone count is known, load only the real zones
-        await self.async_load_zones(device_id)
+        if time.monotonic() < deadline:
+            try:
+                await self.async_load_zones(device_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("zone load failed (%s); poll/pushes will fill in", err)
 
     async def async_probe_reads(self, device_id: str) -> dict[str, str]:
         """Fire every candidate MFD read once and return {read_name: 'ok'|'NAK: ...'}.

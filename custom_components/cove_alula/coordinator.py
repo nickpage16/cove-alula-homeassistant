@@ -8,6 +8,7 @@ from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -63,28 +64,54 @@ class CoveAlulaCoordinator(DataUpdateCoordinator[dict[str, PanelState]]):
         self.async_set_updated_data(dict(self.client.panels))
 
     async def async_setup(self) -> None:
-        """Authenticate, discover panels, connect the socket, and subscribe for state."""
+        """Authenticate, discover panels, open the socket, and subscribe.
+
+        Deliberately FAST. Home Assistant cancels config-entry setup that blocks too long,
+        and pulling the full snapshot here (panel name, firmware, zone names/config/status)
+        could take ~45s against the cloud -- that is what raised CancelledError mid-read.
+        We now only do the quick work, then fetch the snapshot in a background task; the
+        entities fill in as responses and live pushes arrive.
+        """
         try:
-            if self.client.token.is_expired:
-                if self.client.token.is_refreshable:
-                    await self.client.async_refresh()
-                else:
-                    await self.client.async_login(
-                        self.entry.data[CONF_EMAIL],
-                        self.entry.data[CONF_PASSWORD],
-                    )
-            panels = await self.client.async_get_panels()
-            await self.client.async_connect_ws()
-            # Nothing pushes panel state until we subscribe + request a snapshot. This also
-            # pulls the friendly name + zone list (names, config, live status).
-            for panel in panels:
-                await self.client.async_refresh_state(panel.device_id)
-            # give the snapshot + zone responses a moment to arrive before we build entities
-            await asyncio.sleep(3)
+            async with asyncio.timeout(30):
+                if self.client.token.is_expired:
+                    if self.client.token.is_refreshable:
+                        await self.client.async_refresh()
+                    else:
+                        await self.client.async_login(
+                            self.entry.data[CONF_EMAIL],
+                            self.entry.data[CONF_PASSWORD],
+                        )
+                panels = await self.client.async_get_panels()
+                await self.client.async_connect_ws()
+                for panel in panels:
+                    await self.client.async_subscribe_device(panel.device_id)
         except CoveAlulaAuthError as err:
-            raise UpdateFailed(f"Cove/Alula authentication failed: {err}") from err
-        except CoveAlulaError as err:
-            raise UpdateFailed(f"Cove/Alula setup failed: {err}") from err
+            # ConfigEntryAuthFailed makes HA start its re-authentication flow
+            raise ConfigEntryAuthFailed(f"Cove/Alula authentication failed: {err}") from err
+        except (CoveAlulaError, TimeoutError) as err:
+            # ConfigEntryNotReady makes HA retry setup with backoff instead of giving up
+            raise ConfigEntryNotReady(f"Cove/Alula setup failed: {err}") from err
+
+        self.entry.async_create_background_task(
+            self.hass,
+            self._async_bootstrap([p.device_id for p in panels]),
+            "cove_alula_bootstrap",
+        )
+
+    async def _async_bootstrap(self, device_ids: list[str]) -> None:
+        """Pull the first full snapshot AFTER setup has returned, so a slow cloud can never
+        stall (or get cancelled by) config-entry setup."""
+        for device_id in device_ids:
+            try:
+                await self.client.async_refresh_state(device_id, budget=45.0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("initial snapshot for %s incomplete: %s", device_id, err)
+        await asyncio.sleep(1)  # let the last responses land
+        if self.client.panels:
+            self.async_set_updated_data(dict(self.client.panels))
 
     async def _async_update_data(self) -> dict[str, PanelState]:
         """Backstop refresh. The websocket keeps state live and now reconciles on every
@@ -92,14 +119,20 @@ class CoveAlulaCoordinator(DataUpdateCoordinator[dict[str, PanelState]]):
         case a push was ever missed. Transient failures keep the last known state rather
         than flapping every entity to 'unavailable'."""
         try:
-            await self.client.async_connect_ws()  # reconnect if the socket dropped
-            device_ids = list(self.client.panels)
-            if not device_ids:
-                # first run, or panels lost: (re)discover via REST
-                panels = await self.client.async_get_panels()
-                device_ids = [p.device_id for p in panels]
-            for device_id in device_ids:
-                await self.client.async_reconcile(device_id)
+            async with asyncio.timeout(45):
+                await self.client.async_connect_ws()  # reconnect if the socket dropped
+                device_ids = list(self.client.panels)
+                if not device_ids:
+                    # first run, or panels lost: (re)discover via REST
+                    panels = await self.client.async_get_panels()
+                    device_ids = [p.device_id for p in panels]
+                for device_id in device_ids:
+                    await self.client.async_reconcile(device_id)
+        except TimeoutError as err:
+            if self.client.panels:
+                _LOGGER.debug("poll timed out; keeping last known state")
+                return dict(self.client.panels)
+            raise UpdateFailed("timed out talking to the Cove/Alula cloud") from err
         except CoveAlulaAuthError:
             # token died and couldn't refresh -> try a full re-login once
             try:
