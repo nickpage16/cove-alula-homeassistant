@@ -14,6 +14,27 @@ _Nothing yet._
 
 ---
 
+## [0.10.1] - 2026-07-28
+
+### Fixed
+- **Setup failed with `invalid_grant: refresh token is invalid` and did not recover on its
+  own.** When the stored refresh token is rejected (expired, revoked, or already rotated),
+  the integration now automatically falls back to a full login using the stored
+  credentials instead of failing setup. A full re-authentication prompt is only raised if
+  that login *also* fails (genuinely wrong credentials).
+- All token refreshes now run under the auth lock, so concurrent paths (setup, poll,
+  reconnect, watchdog) can't burn a single-use refresh token by refreshing at the same
+  time — a way the stored token could become invalid between restarts.
+
+### Changed
+- **Download diagnostics now works even when the entry failed to set up.** Previously the
+  report assumed a live connection and would error; it now returns the config-entry state
+  and the setup error reason (plus redacted entry data) when the integration isn't loaded,
+  which is exactly when diagnostics are most useful. (The button itself only appears once
+  the integration loads; with the auth fix above, a stuck entry should now load.)
+
+---
+
 ## [0.10.0] - 2026-07-22
 
 ### Added
@@ -150,7 +171,8 @@ releases and are not itemized here.
 > real hardware before the repository was published, so they share a publication date.
 > Every release from here on gets its own dated entry as it ships.
 
-[Unreleased]: https://github.com/sam3gp8/cove-alula-homeassistant/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/sam3gp8/cove-alula-homeassistant/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/sam3gp8/cove-alula-homeassistant/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/sam3gp8/cove-alula-homeassistant/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/sam3gp8/cove-alula-homeassistant/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/sam3gp8/cove-alula-homeassistant/compare/v0.9.0...v0.9.1

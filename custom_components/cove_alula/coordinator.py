@@ -52,6 +52,8 @@ class CoveAlulaCoordinator(DataUpdateCoordinator[dict[str, PanelState]]):
             token=token,
             token_updated=self._persist_token,
             update_callback=self._on_push,
+            username=entry.data[CONF_EMAIL],
+            password=entry.data[CONF_PASSWORD],
         )
 
     async def _persist_token(self, token: CoveToken) -> None:
@@ -74,20 +76,15 @@ class CoveAlulaCoordinator(DataUpdateCoordinator[dict[str, PanelState]]):
         """
         try:
             async with asyncio.timeout(30):
-                if self.client.token.is_expired:
-                    if self.client.token.is_refreshable:
-                        await self.client.async_refresh()
-                    else:
-                        await self.client.async_login(
-                            self.entry.data[CONF_EMAIL],
-                            self.entry.data[CONF_PASSWORD],
-                        )
+                # refresh if we have a token, else log in; if the stored refresh token is
+                # rejected this transparently re-logs in with the stored credentials
+                await self.client.async_ensure_authenticated()
                 panels = await self.client.async_get_panels()
                 await self.client.async_connect_ws()
                 for panel in panels:
                     await self.client.async_subscribe_device(panel.device_id)
         except CoveAlulaAuthError as err:
-            # ConfigEntryAuthFailed makes HA start its re-authentication flow
+            # Genuinely bad credentials (re-login also failed): ask the user to re-auth
             raise ConfigEntryAuthFailed(f"Cove/Alula authentication failed: {err}") from err
         except (CoveAlulaError, TimeoutError) as err:
             # ConfigEntryNotReady makes HA retry setup with backoff instead of giving up

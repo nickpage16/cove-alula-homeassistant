@@ -100,10 +100,7 @@ def _panel_dict(ps: PanelState) -> dict[str, Any]:
 
 
 def _base(hass: HomeAssistant, entry: ConfigEntry, version: str) -> dict[str, Any]:
-    coordinator = hass.data[DOMAIN][entry.entry_id]
-    client = coordinator.client
-    token = client.token
-    return {
+    data: dict[str, Any] = {
         "integration": {"domain": DOMAIN, "version": version},
         "note": (
             "Credentials, the panel device id, and all panel/zone names are redacted. "
@@ -112,30 +109,44 @@ def _base(hass: HomeAssistant, entry: ConfigEntry, version: str) -> dict[str, An
         "entry": {
             "title": REDACTED,  # entry title is the account number
             "version": entry.version,
+            "state": str(entry.state),
+            # setup error message, if the entry failed to load (helps debug auth/setup)
+            "error_reason": (str(entry.reason)[:300] if entry.reason else None),
             "data": async_redact_data(dict(entry.data), TO_REDACT),
             "options": async_redact_data(dict(entry.options), TO_REDACT),
         },
-        "connection": {
-            "ws_connected": client._connected.is_set(),
-            "ws_loop_running": bool(client._ws_task and not client._ws_task.done()),
-            "watchdog_running": bool(
-                client._watchdog_task and not client._watchdog_task.done()
-            ),
-            "subscribed_device_count": len(client._subscribed),
-            "token_valid": not token.is_expired,
-            "token_refreshable": token.is_refreshable,
-            # which panel-data reads the panel answered ("ok"), NAKed, or never returned
-            "panel_data_reads": dict(client._read_results),
-        },
-        "coordinator": {
-            "last_update_success": coordinator.last_update_success,
-            "update_interval_seconds": (
-                coordinator.update_interval.total_seconds()
-                if coordinator.update_interval
-                else None
-            ),
-        },
     }
+
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is None:
+        # entry failed to set up: no live client yet. Return what we can so the report is
+        # still useful for diagnosing the failure (state + error_reason above).
+        data["connection"] = {"status": "not set up (integration failed to load)"}
+        return data
+
+    client = coordinator.client
+    token = client.token
+    data["connection"] = {
+        "ws_connected": client._connected.is_set(),
+        "ws_loop_running": bool(client._ws_task and not client._ws_task.done()),
+        "watchdog_running": bool(
+            client._watchdog_task and not client._watchdog_task.done()
+        ),
+        "subscribed_device_count": len(client._subscribed),
+        "token_valid": not token.is_expired,
+        "token_refreshable": token.is_refreshable,
+        # which panel-data reads the panel answered ("ok"), NAKed, or never returned
+        "panel_data_reads": dict(client._read_results),
+    }
+    data["coordinator"] = {
+        "last_update_success": coordinator.last_update_success,
+        "update_interval_seconds": (
+            coordinator.update_interval.total_seconds()
+            if coordinator.update_interval
+            else None
+        ),
+    }
+    return data
 
 
 async def async_get_config_entry_diagnostics(
@@ -143,9 +154,10 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Diagnostics for the whole config entry (all panels)."""
     integration = await async_get_integration(hass, DOMAIN)
-    client = hass.data[DOMAIN][entry.entry_id].client
     data = _base(hass, entry, str(integration.version))
-    data["panels"] = [_panel_dict(ps) for ps in client.panels.values()]
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is not None:
+        data["panels"] = [_panel_dict(ps) for ps in coordinator.client.panels.values()]
     return data
 
 
@@ -154,9 +166,11 @@ async def async_get_device_diagnostics(
 ) -> dict[str, Any]:
     """Diagnostics scoped to one device/panel."""
     integration = await async_get_integration(hass, DOMAIN)
-    client = hass.data[DOMAIN][entry.entry_id].client
-    ids = {i[1] for i in device.identifiers if i[0] == DOMAIN}
-    panels = [ps for did, ps in client.panels.items() if did in ids]
     data = _base(hass, entry, str(integration.version))
-    data["panels"] = [_panel_dict(ps) for ps in (panels or client.panels.values())]
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is not None:
+        client = coordinator.client
+        ids = {i[1] for i in device.identifiers if i[0] == DOMAIN}
+        panels = [ps for did, ps in client.panels.items() if did in ids]
+        data["panels"] = [_panel_dict(ps) for ps in (panels or client.panels.values())]
     return data

@@ -315,12 +315,18 @@ class CoveAlulaClient:
         token_updated: Optional[Callable[[CoveToken], Awaitable[None] | None]] = None,
         update_callback: Optional[Callable[[PanelState], Awaitable[None] | None]] = None,
         raw_callback: Optional[Callable[[dict], None]] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
     ) -> None:
         self._session = session
         self._own_session = session is None
         self._token = token or CoveToken()
         self._token_updated = token_updated
         self._update_callback = update_callback
+        # Stored so we can silently re-login when the refresh token is rejected
+        # (expired/revoked/rotated). Without these, a dead refresh token is fatal.
+        self._username = username
+        self._password = password
         # Optional hook that receives every decoded inbound WS frame (for debugging /
         # protocol discovery). Synchronous; keep it cheap.
         self._raw_callback = raw_callback
@@ -389,6 +395,34 @@ class CoveAlulaClient:
             "refresh_token": self._token.refresh_token,
         })
 
+    async def _refresh_or_login(self) -> None:
+        """Obtain a fresh access token. Prefer the refresh token; if it is rejected
+        (expired/revoked/single-use-rotated), fall back to a full login with the stored
+        credentials. Caller must hold `_auth_lock` (token rotation is single-use, so
+        concurrent refreshes must be serialized). Either success persists the new token."""
+        if self._token.is_refreshable:
+            try:
+                await self.async_refresh()
+                return
+            except CoveAlulaAuthError as err:
+                if not (self._username and self._password):
+                    raise
+                _LOGGER.warning(
+                    "Cove/Alula token refresh rejected (%s); re-logging in with stored "
+                    "credentials", err,
+                )
+        if self._username and self._password:
+            await self.async_login(self._username, self._password)
+        else:
+            raise CoveAlulaAuthError("token expired and no stored credentials to re-login")
+
+    async def async_ensure_authenticated(self) -> None:
+        """Public, locked entrypoint: make sure we hold a usable access token, refreshing
+        or re-logging in as needed. Used at setup so a dead refresh token self-heals."""
+        async with self._auth_lock:
+            if self._token.is_expired or not self._token.access_token:
+                await self._refresh_or_login()
+
     async def _token_request(self, extra: dict) -> None:
         session = await self._ensure_session()
         data = {"client_id": CLIENT_ID, "client_secret": CLIENT_SECRET, **extra}
@@ -415,11 +449,8 @@ class CoveAlulaClient:
 
     async def _valid_access_token(self) -> str:
         async with self._auth_lock:
-            if self._token.is_expired:
-                if self._token.is_refreshable:
-                    await self.async_refresh()
-                else:
-                    raise CoveAlulaAuthError("token expired and not refreshable; login again")
+            if self._token.is_expired or not self._token.access_token:
+                await self._refresh_or_login()
             assert self._token.access_token
             return self._token.access_token
 
@@ -439,8 +470,9 @@ class CoveAlulaClient:
             headers["Content-Type"] = "application/json; charset=utf-8"
         async with session.request(method, url, headers=headers, json=json_body) as resp:
             text = await resp.text()
-            if resp.status == 401 and retry_auth and self._token.is_refreshable:
-                await self.async_refresh()
+            if resp.status == 401 and retry_auth:
+                async with self._auth_lock:
+                    await self._refresh_or_login()
                 return await self._rest(method, path, json_body=json_body, retry_auth=False)
             if resp.status >= 400:
                 raise CoveAlulaError(f"{method} {path} -> HTTP {resp.status}: {text[:300]}")
@@ -551,7 +583,7 @@ class CoveAlulaClient:
                 if self._token.expires_at - time.time() > 90.0:
                     continue  # not close enough to expiry yet
                 async with self._auth_lock:
-                    await self.async_refresh()
+                    await self._refresh_or_login()
                 ws = self._ws
                 if ws is not None and not ws.closed:
                     # closing makes _ws_loop fall through and reopen with the fresh token
