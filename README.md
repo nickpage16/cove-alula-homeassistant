@@ -2,8 +2,10 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![Validate](https://github.com/sam3gp8/cove-alula-homeassistant/actions/workflows/validate.yml/badge.svg)](https://github.com/sam3gp8/cove-alula-homeassistant/actions/workflows/validate.yml)
-![version](https://img.shields.io/badge/version-0.9.2-blue.svg)
+![version](https://img.shields.io/badge/version-0.10.0-blue.svg)
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/sam3gp8)
+
+📋 **[Changelog](CHANGELOG.md)** — what changed in each release.
 
 Control and monitor a **Cove** home-security system (built on the **Alula "Connect"**
 cloud platform) from Home Assistant. Adds an `alarm_control_panel` entity that can arm
@@ -60,23 +62,26 @@ exact name:
 # from the extracted folder (contains custom_components/, hacs.json, README.md, .github/)
 git init -b main
 git add .
-git commit -m "Cove (Alula) Alarm v0.8.0"
+git commit -m "Cove (Alula) Alarm v0.10.0"
 git remote add origin https://github.com/sam3gp8/cove-alula-homeassistant.git
 git push -u origin main
 
 # cut a release so HACS has a versioned download (tag must match manifest "version")
-git tag v0.8.0
-git push origin v0.8.0
+git tag v0.10.0
+git push origin v0.10.0
 ```
 
-Then on GitHub: **Releases → Draft a new release → choose tag `v0.8.0` → Publish.**
-HACS installs the latest release; the tag (`v0.8.0`) and the manifest `version`
-(`0.8.0`) must stay in sync on every release.
+Then on GitHub: **Releases → Draft a new release → choose tag `v0.10.0` → Publish**, and
+paste that version's section from [CHANGELOG.md](CHANGELOG.md) into the release notes —
+HACS shows those notes to users before they update.
+
+HACS installs the latest release, so three things must stay in sync on every release: the
+git tag (`v0.10.0`), the manifest `version` (`0.10.0`), and the `CHANGELOG.md` heading.
 
 The included CI workflow (`.github/workflows/validate.yml`) runs **HACS validation** and
 Home Assistant **hassfest** on every push, so you'll see a green check once it's pushed.
-(The HACS check skips the *brands* test, which only applies to integrations submitted to
-the official `home-assistant/brands` repo.)
+The HACS check runs with no ignores — the brand icons shipped in
+`custom_components/cove_alula/brand/` satisfy the brands test.
 
 > If you name the GitHub repo something other than `cove-alula-homeassistant`, update
 > the URLs in `custom_components/cove_alula/manifest.json`, the badge/My-HA links in this
@@ -227,6 +232,12 @@ or `Arm Home` lands on the wrong mode, run `names`, then adjust `LEVEL_STAY` / `
   embedded in the Cove app were rotated in a newer app version. They live in `covealula.py`
   (`CLIENT_ID` / `CLIENT_SECRET`) and can be re-extracted from a current app build.
 * **Rate limited (HTTP 429).** Back off; don't loop auth/PIN attempts.
+
+**Download diagnostics** for a bug report: **Settings → Devices & Services → Cove (Alula)
+Alarm → ⋮ → Download diagnostics** (or the same menu on a device page). The file is safe
+to share — credentials, the panel device id, and all panel/zone names are redacted, while
+connection state, per-read results, arming level, troubles, and per-zone state (by index)
+are kept.
 
 Enable debug logging to see frames in HA logs:
 

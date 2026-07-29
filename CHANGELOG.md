@@ -14,6 +14,19 @@ _Nothing yet._
 
 ---
 
+## [0.10.0] - 2026-07-22
+
+### Added
+- **Download diagnostics.** A "Download diagnostics" button now appears on the
+  integration's config-entry page and on each device page. The report is designed to be
+  safe to attach to a bug report: credentials (account number, email, password, PIN,
+  token), the panel's device id, and all panel and zone **names** are redacted. What it
+  keeps is what's useful for debugging — integration version, websocket/token connection
+  state, which panel-data reads the panel answered vs NAKed vs never returned, arming
+  level and troubles, and per-zone type and state keyed by zone index.
+
+---
+
 ## [0.9.2] - 2026-07-22
 
 ### Fixed
@@ -137,7 +150,8 @@ releases and are not itemized here.
 > real hardware before the repository was published, so they share a publication date.
 > Every release from here on gets its own dated entry as it ships.
 
-[Unreleased]: https://github.com/sam3gp8/cove-alula-homeassistant/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/sam3gp8/cove-alula-homeassistant/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/sam3gp8/cove-alula-homeassistant/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/sam3gp8/cove-alula-homeassistant/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/sam3gp8/cove-alula-homeassistant/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/sam3gp8/cove-alula-homeassistant/compare/v0.8.0...v0.9.0
