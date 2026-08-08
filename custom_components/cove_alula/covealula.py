@@ -62,7 +62,21 @@ LEVEL_STAY = 2   # home / first armed level
 LEVEL_NIGHT = 3  # corrected from on-device testing (enum nominally called byte 3 "away")
 LEVEL_AWAY = 4   # corrected from on-device testing (enum nominally called byte 4 "night")
 
-CMD_CHANGE_ARMING_LEVEL = "changeArmingLevelUsingCode"
+# Arming differs by Alula panel family (see PanelState.supports_partition_arming):
+#   Helix        -> changeArmingLevelUsingCode  (numeric armingLevelValue + PIN)
+#   ConnectFlex  -> partitionArmingLevelChange  (string level + partitions + userNumber,
+#                                                PIN only for disarm)
+CMD_CHANGE_ARMING_LEVEL_CODE = "changeArmingLevelUsingCode"
+CMD_CHANGE_ARMING_LEVEL_PARTITION = "partitionArmingLevelChange"
+# ConnectFlex-family panel ids that use the partition arming command.
+_PARTITION_PANEL_FAMILIES = frozenset({
+    "connectflx", "connectflx_z", "connectflx_dual", "connectflx_dual_z",
+})
+# level number -> string name used by the ConnectFlex partition command
+_PARTITION_LEVEL_NAME = {
+    LEVEL_DISARM: "disarm", LEVEL_STAY: "stay",
+    LEVEL_NIGHT: "night", LEVEL_AWAY: "away",
+}
 CMD_REQUEST_MFD = "requestMfd"
 CMD_WRITE_MFD = "writeMfd"
 CHANNEL_HELIX = "device.helix"
@@ -83,6 +97,21 @@ class CoveAlulaAuthError(CoveAlulaError):
 def _pin_to_array(pin: str) -> list[str]:
     """'1234' -> ['1','2','3','4'] as the panel expects."""
     return list(str(pin).strip())
+
+
+def _is_unsupported_command_nak(resp: Optional[dict]) -> bool:
+    """True if a helix command response is a NAK whose reason is that the command is not
+    supported — i.e. we sent the wrong panel family's arming command. Used to fall back
+    to the other command. Any other response (ack, a different NAK, or None) returns False."""
+    if not isinstance(resp, dict):
+        return False
+    event = resp.get("event") if isinstance(resp.get("event"), dict) else None
+    data = event.get("data") if (event and isinstance(event.get("data"), dict)) else resp
+    if not isinstance(data, dict) or data.get("cmdrsp") != "nak":
+        return False
+    reasons = (data.get("payload") or {}).get("nakReasons") or []
+    text = " ".join(str(r.get("reason", "")) for r in reasons).lower()
+    return "unsupported command" in text
 
 
 @dataclass
@@ -171,6 +200,7 @@ class PanelState:
     device_id: str
     name: Optional[str] = None
     panel_name: Optional[str] = None   # friendly system name, e.g. "My Home"
+    connected_panel: str = ""          # Alula panel family id, e.g. "helix" / "connectflx"
     online: Optional[bool] = None
     serial_number: Optional[str] = None
     firmware_version: Optional[str] = None
@@ -198,6 +228,8 @@ class PanelState:
     def apply(self, attrs: dict) -> None:
         """Merge an attributes dict (REST attributes or a socket status payload)."""
         self.raw.update(attrs)
+        if "connectedPanel" in attrs:
+            self.connected_panel = attrs["connectedPanel"] or ""
         if "name" in attrs:
             self.name = attrs["name"]
         if "panel_name" in attrs and attrs["panel_name"] not in (None, ""):
@@ -255,6 +287,12 @@ class PanelState:
         if not any(z.open is not None for z in zones):
             return None  # no zone status yet -> unknown
         return len(self.not_ready_zones) == 0
+
+    @property
+    def supports_partition_arming(self) -> bool:
+        """True for ConnectFlex-family panels, which arm via partitionArmingLevelChange
+        rather than the Helix changeArmingLevelUsingCode command."""
+        return self.connected_panel in _PARTITION_PANEL_FAMILIES
 
 
 
@@ -344,6 +382,9 @@ class CoveAlulaClient:
         # diagnostics: map requestId -> MFD read name, and read name -> result string
         self._req_names: dict[str, str] = {}
         self._read_results: dict[str, str] = {}
+        # device_id -> "code" | "partition": the arming command family confirmed to work on
+        # this panel (learned when a command is accepted, so we skip the failing one after).
+        self._arming_command_kind: dict[str, str] = {}
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -502,11 +543,18 @@ class CoveAlulaClient:
             dev_id = str(dev.get("id") or attrs.get("device_id") or "")
             if not dev_id:
                 continue
-            if not _as_bool(attrs.get("is_panel", False)):
-                # Some accounts only have the panel; if is_panel is absent, include
-                # anything that isn't explicitly a camera.
-                if _as_bool(attrs.get("is_camera", False)):
+            # Panel-vs-not filter. The REST API uses camelCase (isPanel / isCamera); the
+            # earlier snake_case-only check never matched, so panels were actually included
+            # by the "not a camera" fallback below. Now: trust an explicit panel flag when
+            # present (this is what includes ConnectFlex panels and excludes flagged
+            # non-panels); if the account sends no panel flag at all, fall back to
+            # "include unless it's a camera" so a panel that omits the flag isn't dropped.
+            raw_is_panel = attrs.get("is_panel", attrs.get("isPanel"))
+            if raw_is_panel is not None:
+                if not _as_bool(raw_is_panel):
                     continue
+            elif _as_bool(attrs.get("is_camera", attrs.get("isCamera", False))):
+                continue
             ps = self.panels.get(dev_id) or PanelState(device_id=dev_id)
             ps.apply(attrs)
             self.panels[dev_id] = ps
@@ -1298,17 +1346,85 @@ class CoveAlulaClient:
         no_entry_delay: bool = False,
         wait: bool = False,
     ) -> Optional[dict]:
-        """Set armingLevelValue using `pin`. 1=disarm, 2=stay, 3=night, 4=away, … (the
-        meaning of each armed level is per-panel; confirm with request_arming_level_names)."""
+        """Set the arming level using `pin`. 1=disarm, 2=stay, 3=night, 4=away, … (the
+        meaning of each armed level is per-panel; confirm with request_arming_level_names).
+
+        The command differs by Alula panel family: Helix uses changeArmingLevelUsingCode
+        (numeric level + PIN); ConnectFlex uses partitionArmingLevelChange (string level +
+        partitions, armed by user number, PIN only for disarm). We pick the command the
+        panel most likely wants, and if the panel rejects it as an *unsupported command* we
+        automatically retry with the other family's command and remember which one worked —
+        so this is correct even when we can't identify the panel family up front."""
+        order = (["partition", "code"]
+                 if self._preferred_arming_kind(device_id) == "partition"
+                 else ["code", "partition"])
+        last: Optional[dict] = None
+        for i, kind in enumerate(order):
+            command, payload = self._build_arming_command(
+                kind, level, pin, silent=silent, no_entry_delay=no_entry_delay
+            )
+            # wait on all but the final attempt so we can detect an unsupported-command NAK
+            # and fall back; honor the caller's `wait` on the last attempt
+            want = True if i < len(order) - 1 else wait
+            resp = await self._helix_command(
+                device_id, command, payload, wait=want, timeout=12.0
+            )
+            last = resp
+            if not _is_unsupported_command_nak(resp):
+                self._arming_command_kind[device_id] = kind  # this family works
+                return resp
+            _LOGGER.info(
+                "panel %s rejected %s as unsupported; retrying with the other arming command",
+                device_id, command,
+            )
+        return last
+
+    def _preferred_arming_kind(self, device_id: str) -> str:
+        """Which arming command to try first: 'partition' for ConnectFlex-family panels,
+        else 'code' (Helix). Uses, in order: a previously-learned result, an explicit
+        connectedPanel family id, or the panel's read capabilities (a partition panel
+        answers partitionStatus but NAKs panelStatus)."""
+        cached = self._arming_command_kind.get(device_id)
+        if cached:
+            return cached
+        panel = self.panels.get(device_id)
+        if panel is not None and panel.supports_partition_arming:
+            return "partition"
+        rr = self._read_results
+        if rr.get("partitionStatus") == "ok" and str(rr.get("panelStatus", "")).startswith("NAK"):
+            return "partition"
+        return "code"
+
+    def _build_arming_command(
+        self, kind: str, level: int, pin: str, *, silent: bool, no_entry_delay: bool
+    ) -> tuple[str, dict]:
+        """Build the (command, payload) pair for one arming-command family."""
+        if kind == "partition":
+            name = _PARTITION_LEVEL_NAME.get(int(level))
+            if name is None:
+                raise CoveAlulaError(
+                    f"partition arming does not support arming level {level}"
+                )
+            payload = {
+                "armingLevel": name,
+                "partitions": [True, False, False, False, False, False, False, False],
+                "armSilent": bool(silent),
+                "noEntryDelay": bool(no_entry_delay),
+                # ConnectFlex arms by user number; disarm authenticates with the PIN
+                "authType": "pin" if level == LEVEL_DISARM else "user",
+                "userNumber": 0,
+                "forceArm": False,
+            }
+            if level == LEVEL_DISARM:
+                payload["pin"] = _pin_to_array(pin)
+            return CMD_CHANGE_ARMING_LEVEL_PARTITION, payload
         payload = {
             "armingLevelValue": int(level),
             "armSilent": bool(silent),
             "noEntryDelay": bool(no_entry_delay),
             "pin": _pin_to_array(pin),
         }
-        return await self._helix_command(
-            device_id, CMD_CHANGE_ARMING_LEVEL, payload, wait=wait
-        )
+        return CMD_CHANGE_ARMING_LEVEL_CODE, payload
 
     async def async_disarm(self, device_id: str, pin: str, **kw) -> Optional[dict]:
         return await self.async_set_arming_level(device_id, LEVEL_DISARM, pin, **kw)
