@@ -1441,8 +1441,15 @@ class CoveAlulaClient:
                     # unsupported-command NAK and fall back; honor the caller's `wait`
                     # on the last attempt
                     want = True if i < len(order) - 1 else wait
+                    # Was 12.0s. Observed live: all 3 attempts (the original call plus
+                    # both retries added above) failed at exactly this mark on a real
+                    # arm attempt -- the same signature as the highestUsedIndexes 5s
+                    # timeout that turned out to just be too tight for this install's
+                    # real round-trip time, not a genuine unsupported-command case
+                    # (those NAK immediately rather than timing out). Bumped to 20.0s;
+                    # the retry loop above remains as a safety net for genuine blips.
                     resp = await self._helix_command(
-                        device_id, command, payload, wait=want, timeout=12.0
+                        device_id, command, payload, wait=want, timeout=20.0
                     )
                     last = resp
                     if not _is_unsupported_command_nak(resp):
