@@ -1268,9 +1268,23 @@ class CoveAlulaClient:
         are uncertain: it only uses zoneBypass + changeArmingLevelUsingCode, both verified.
         Bypasses clear when the panel is next disarmed.
         """
-        # make sure we have fresh zone status to know what's open
+        # make sure we have fresh zone status to know what's open. Use the real,
+        # already-known zone count rather than unconditionally scanning 0-63 -- that
+        # scan is what created a phantom entity for every response, observed live as a
+        # burst of ~58-64 bogus "Zone N" entities (see async_reconcile's equivalent fix).
+        # highest_zone_index is learned during setup, well before any arm attempt, so the
+        # unknown branch below should be rare in practice.
+        ps = self.panels.get(device_id)
+        zone_last = int(ps.highest_zone_index) if (ps and ps.highest_zone_index is not None) else None
         try:
-            await self.request_zone_statuses(device_id, 0, 63)
+            if zone_last is not None:
+                await self.request_zone_statuses(device_id, 0, zone_last)
+            else:
+                _LOGGER.debug(
+                    "async_arm_bypassing_open: zone count unknown for %s; skipping "
+                    "zone-status refresh rather than scanning the full 0-63 range",
+                    device_id,
+                )
             await asyncio.sleep(1.2)
         except CoveAlulaError:
             pass
