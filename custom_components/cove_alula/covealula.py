@@ -632,6 +632,16 @@ class CoveAlulaClient:
                     continue  # not close enough to expiry yet
                 async with self._auth_lock:
                     await self._refresh_or_login()
+                # Avoid recycling the socket while a command is waiting on a response --
+                # yanking the connection mid-request is what surfaces as "no response
+                # within Ns" on arm/disarm calls (_helix_command's CoveAlulaError). Give
+                # in-flight requests a bounded window to finish first; if they don't
+                # drain in time, proceed anyway so the recycle is never deferred
+                # indefinitely (the token was already refreshed above regardless).
+                for _ in range(6):  # ~3s max, comfortably inside _helix_command's timeout
+                    if not self._pending:
+                        break
+                    await asyncio.sleep(0.5)
                 ws = self._ws
                 if ws is not None and not ws.closed:
                     # closing makes _ws_loop fall through and reopen with the fresh token
@@ -1065,8 +1075,21 @@ class CoveAlulaClient:
         await self.request_panel_status(device_id)
         await asyncio.sleep(0.15)
         ps = self.panels.get(device_id)
-        last = int(ps.highest_zone_index) if (ps and ps.highest_zone_index is not None) else 63
-        await self.request_zone_statuses(device_id, 0, last)
+        if ps is None or ps.highest_zone_index is None:
+            # Real zone count still unknown (e.g. this reconcile raced the initial
+            # setup's own highestUsedIndexes read, or the request above also failed/
+            # timed out). Previously this fell back to `last = 63`, scanning the full
+            # protocol-supported zone range and creating a phantom entity for every
+            # response -- observed live as a burst of ~58 bogus "Zone N" entities that
+            # don't correspond to any real panel zone. Skip this reconcile's zone-status
+            # refresh instead of guessing; the explicit setup flow (or a later reconcile,
+            # once the index is known) fills in real zone state shortly after.
+            _LOGGER.debug(
+                "reconcile: highest zone index still unknown for %s; skipping zone-status "
+                "refresh rather than scanning the full 0-63 range", device_id,
+            )
+            return
+        await self.request_zone_statuses(device_id, 0, int(ps.highest_zone_index))
 
     async def async_subscribe_device(self, device_id: str, *, ready_timeout: float = 8.0) -> None:
         """Subscribe to live status + helix channels for a device.
