@@ -1067,7 +1067,12 @@ class CoveAlulaClient:
         ps = self.panels.get(device_id)
         if ps is None or ps.highest_zone_index is None:
             try:
-                await self.request_highest_indices(device_id, wait=True, timeout=5)
+                # Was hardcoded to 5s, well under this panel/cloud combination's real
+                # round-trip time -- observed live to fail 100% of the time, every single
+                # reconcile cycle, never once succeeding at 5s. _read_mfd's own default
+                # (15.0) is what every other MFD read in this file already relies on;
+                # there was no reason for this one call to override it down.
+                await self.request_highest_indices(device_id, wait=True, timeout=15.0)
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001
@@ -1400,6 +1405,8 @@ class CoveAlulaClient:
         silent: bool = False,
         no_entry_delay: bool = False,
         wait: bool = False,
+        max_retries: int = 2,
+        retry_delay: float = 3.0,
     ) -> Optional[dict]:
         """Set the arming level using `pin`. 1=disarm, 2=stay, 3=night, 4=away, … (the
         meaning of each armed level is per-panel; confirm with request_arming_level_names).
@@ -1409,29 +1416,53 @@ class CoveAlulaClient:
         partitions, armed by user number, PIN only for disarm). We pick the command the
         panel most likely wants, and if the panel rejects it as an *unsupported command* we
         automatically retry with the other family's command and remember which one worked —
-        so this is correct even when we can't identify the panel family up front."""
+        so this is correct even when we can't identify the panel family up front.
+
+        Retries on a plain timeout (CoveAlulaError from _helix_command), up to
+        `max_retries` additional attempts with `retry_delay` between them -- observed live
+        that a single WS round-trip occasionally doesn't get a response within 12s (most
+        likely contention with the coordinator's own periodic reconcile traffic on the same
+        connection), with no retry previously in place, so a single dashboard tap could
+        require the user to press it again by hand. Arming/disarming an already-armed or
+        already-disarmed panel is a safe no-op on this hardware, so retrying the whole
+        command (including re-running the family-detection fallback below) is safe -- this
+        never risks a double physical action, only a repeated one."""
         order = (["partition", "code"]
                  if self._preferred_arming_kind(device_id) == "partition"
                  else ["code", "partition"])
         last: Optional[dict] = None
-        for i, kind in enumerate(order):
-            command, payload = self._build_arming_command(
-                kind, level, pin, silent=silent, no_entry_delay=no_entry_delay
-            )
-            # wait on all but the final attempt so we can detect an unsupported-command NAK
-            # and fall back; honor the caller's `wait` on the last attempt
-            want = True if i < len(order) - 1 else wait
-            resp = await self._helix_command(
-                device_id, command, payload, wait=want, timeout=12.0
-            )
-            last = resp
-            if not _is_unsupported_command_nak(resp):
-                self._arming_command_kind[device_id] = kind  # this family works
-                return resp
-            _LOGGER.info(
-                "panel %s rejected %s as unsupported; retrying with the other arming command",
-                device_id, command,
-            )
+        for attempt in range(max_retries + 1):
+            try:
+                for i, kind in enumerate(order):
+                    command, payload = self._build_arming_command(
+                        kind, level, pin, silent=silent, no_entry_delay=no_entry_delay
+                    )
+                    # wait on all but the final attempt so we can detect an
+                    # unsupported-command NAK and fall back; honor the caller's `wait`
+                    # on the last attempt
+                    want = True if i < len(order) - 1 else wait
+                    resp = await self._helix_command(
+                        device_id, command, payload, wait=want, timeout=12.0
+                    )
+                    last = resp
+                    if not _is_unsupported_command_nak(resp):
+                        self._arming_command_kind[device_id] = kind  # this family works
+                        return resp
+                    _LOGGER.info(
+                        "panel %s rejected %s as unsupported; retrying with the other "
+                        "arming command", device_id, command,
+                    )
+                return last
+            except CoveAlulaError as err:
+                if attempt < max_retries:
+                    _LOGGER.warning(
+                        "arm/disarm command for %s timed out (attempt %d/%d): %s; "
+                        "retrying in %.1fs", device_id, attempt + 1, max_retries + 1,
+                        err, retry_delay,
+                    )
+                    await asyncio.sleep(retry_delay)
+                    continue
+                raise
         return last
 
     def _preferred_arming_kind(self, device_id: str) -> str:
