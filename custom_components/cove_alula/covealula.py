@@ -1197,14 +1197,32 @@ class CoveAlulaClient:
             **kw,
         )
 
-    async def async_load_zones(self, device_id: str, *, last: int = 63) -> None:
+    async def async_load_zones(self, device_id: str, *, last: Optional[int] = None) -> None:
         """Pull zone names, configurations, and live statuses for the panel. Responses
         arrive on the receive loop and populate PanelState.zones. Capped to the panel's
-        highest used zone index when known so we don't create phantom zones."""
+        highest used zone index when known so we don't create phantom zones.
+
+        The `last=63` default this used to carry was itself the bug: if the caller didn't
+        pass an explicit value and `highest_zone_index` wasn't cached yet (e.g. the
+        `request_highest_indices` call in async_refresh_state's budgeted sequence didn't
+        complete in time -- a real, observed failure mode, not hypothetical), this silently
+        fell through to scanning the full protocol-supported 0-63 range, creating a phantom
+        entity for every response. Observed live, twice, from two different callers before
+        this one was found. No caller in this codebase passes `last` explicitly, so the
+        only way to get a real value here is the cache lookup below -- if that's empty,
+        skip instead of guessing.
+        """
         await self.async_subscribe_device(device_id)
         ps = self.panels.get(device_id)
         if ps and ps.highest_zone_index is not None:
             last = max(0, int(ps.highest_zone_index))
+        if last is None:
+            _LOGGER.debug(
+                "async_load_zones: zone count unknown for %s; skipping zone load rather "
+                "than scanning the full 0-63 range -- a later refresh/reconcile will pick "
+                "it up once the index is known", device_id,
+            )
+            return
         await self.request_zone_names(device_id, 0, last)
         await asyncio.sleep(0.2)
         await self.request_zone_configurations(device_id, 0, last)
